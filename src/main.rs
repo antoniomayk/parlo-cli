@@ -147,16 +147,34 @@ fn handle_eof_err(result: result::Result<(), Error>) -> result::Result<(), Error
     }
 }
 
+fn stereo_to_mono(samples_left: &[f32], samples_right: &[f32]) -> Vec<f32> {
+    samples_left
+        .iter()
+        .zip(samples_right.iter())
+        .map(|(x, y)| (x + y) / 2.0)
+        .collect::<Vec<f32>>()
+}
+
 fn resample_audio_buffer<'a>(audio_buffer: AudioBufferRef<'_>) -> Vec<Vec<f32>> {
     let resample_ratio = 16_000 as f64 / audio_buffer.spec().rate as f64;
     let audio_buffer_capacity = audio_buffer.capacity();
+    let audio_buffer_frames = audio_buffer.frames();
+    let audio_buffer_channels_count = audio_buffer.spec().channels.count();
 
     let mut sample_buffer =
-        SampleBuffer::<f32>::new(audio_buffer.capacity() as u64, *audio_buffer.spec());
+        SampleBuffer::<f32>::new(audio_buffer_capacity as u64, *audio_buffer.spec());
 
     sample_buffer.copy_planar_ref(audio_buffer);
 
-    let samples = sample_buffer.samples();
+    let samples = sample_buffer.samples().to_vec();
+    let samples_mono = if audio_buffer_channels_count == 2 {
+        stereo_to_mono(
+            &samples[..audio_buffer_frames], // LEFT
+            &samples[audio_buffer_frames..], // RIGHT
+        )
+    } else {
+        samples
+    };
 
     let interpolator = SincInterpolationParameters {
         sinc_len: 8,
@@ -167,7 +185,7 @@ fn resample_audio_buffer<'a>(audio_buffer: AudioBufferRef<'_>) -> Vec<Vec<f32>> 
     };
 
     let mut resampler =
-        match SincFixedIn::<f32>::new(resample_ratio, 2., interpolator, audio_buffer_capacity, 1) {
+        match SincFixedIn::<f32>::new(resample_ratio, 2., interpolator, audio_buffer_frames, 1) {
             Ok(it) => it,
             Err(err) => panic!(
                 "{}",
@@ -178,7 +196,7 @@ fn resample_audio_buffer<'a>(audio_buffer: AudioBufferRef<'_>) -> Vec<Vec<f32>> 
             ),
         };
 
-    match resampler.process(&[samples], None) {
+    match resampler.process(&[samples_mono.as_slice()], None) {
         Ok(it) => it,
         Err(err) => panic!(
             "{}",
