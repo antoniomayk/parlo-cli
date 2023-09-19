@@ -1,4 +1,9 @@
-use std::{fs::File, io::ErrorKind, result};
+use std::{
+    fmt::Debug,
+    fs::File,
+    io::{BufWriter, ErrorKind, Write},
+    result,
+};
 
 use clap::Parser;
 use indoc::formatdoc;
@@ -27,15 +32,19 @@ struct ParloArgs {
     /// File system path for the GMML model
     #[arg(short, long)]
     model: String,
+
+    /// Export to SRT file
+    #[arg(short, long)]
+    export: Option<String>,
 }
 
 fn main() {
     let parlo_args = ParloArgs::parse();
 
     let audio = read_audio_file(&parlo_args.audio);
-    let model = parlo_args.model;
+    let model = &parlo_args.model;
 
-    transcribe_audio_buffer(&audio, &model);
+    transcribe_audio_buffer(&audio, &model, &parlo_args);
 }
 
 fn read_audio_file(path: &str) -> Vec<f32> {
@@ -208,9 +217,8 @@ fn resample_audio_buffer<'a>(audio_buffer: AudioBufferRef<'_>) -> Vec<Vec<f32>> 
     }
 }
 
-fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str) {
+fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str, parlo_args: &ParloArgs) {
     let whisper_context = WhisperContext::new(model).unwrap();
-    whisper_context.print_timings();
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 2 });
     params.set_n_threads((std::thread::available_parallelism().unwrap().get() / 2) as i32);
@@ -223,10 +231,28 @@ fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str) {
     let mut state = whisper_context.create_state().unwrap();
     state.full(params, audio).unwrap();
 
+    let mut export = match parlo_args.export {
+        Some(ref it) => Some(BufWriter::new(File::create(it).unwrap())),
+        None => None,
+    };
+
     for i in 0..state.full_n_segments().unwrap() {
         let start_time_millis = segment_timestamp_to_millis(state.full_get_segment_t0(i).unwrap());
         let end_time_millis = segment_timestamp_to_millis(state.full_get_segment_t1(i).unwrap());
         let segment = state.full_get_segment_text(i).unwrap();
+
+        match export {
+            Some(ref mut it) => {
+                let text = format!(
+                    "{i}\n{} --> {}\n{}\n\n",
+                    millis_to_time(start_time_millis),
+                    millis_to_time(end_time_millis),
+                    segment.trim()
+                );
+                it.write(text.as_bytes()).unwrap();
+            }
+            None => (),
+        };
 
         println!(
             "{i}\n{} --> {}\n{}\n",
@@ -235,6 +261,11 @@ fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str) {
             segment.trim()
         );
     }
+
+    match export {
+        Some(mut it) => it.flush().unwrap(),
+        None => (),
+    };
 }
 
 fn segment_timestamp_to_millis(t: i64) -> usize {
