@@ -1,14 +1,13 @@
+use clap::Parser;
+use indoc::formatdoc;
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use std::{
     fmt::Debug,
     fs::File,
     io::{BufWriter, ErrorKind, Write},
     result,
-};
-
-use clap::Parser;
-use indoc::formatdoc;
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use symphonia::core::{
     audio::{AudioBufferRef, SampleBuffer},
@@ -44,7 +43,10 @@ fn main() {
     let audio = read_audio_file(&parlo_args.audio);
     let model = &parlo_args.model;
 
-    transcribe_audio_buffer(&audio, &model, &parlo_args);
+    let parlo = transcribe_audio_buffer(&audio, &model);
+
+    print_text_segments(&parlo);
+    export_to_srt(&parlo_args, &parlo);
 }
 
 fn read_audio_file(path: &str) -> Vec<f32> {
@@ -217,7 +219,34 @@ fn resample_audio_buffer<'a>(audio_buffer: AudioBufferRef<'_>) -> Vec<Vec<f32>> 
     }
 }
 
-fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str, parlo_args: &ParloArgs) {
+#[derive(Debug)]
+pub struct ParloToken {
+    pub id: i32,
+    pub tid: i32,
+    pub p: f32,
+    pub plog: f32,
+    pub pt: f32,
+    pub ptsum: f32,
+    pub t0: i64,
+    pub t1: i64,
+    pub vlen: f32,
+    pub text: String,
+}
+
+#[derive(Debug)]
+pub struct ParloSegment {
+    pub tokens: Vec<ParloToken>,
+    pub t0: i64,
+    pub t1: i64,
+    pub text: String,
+}
+
+#[derive(Debug)]
+pub struct Parlo {
+    pub segments: Vec<ParloSegment>,
+}
+
+fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str) -> Parlo {
     let whisper_context = WhisperContext::new(model).unwrap();
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 2 });
@@ -231,41 +260,78 @@ fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str, parlo_args: &ParloArgs
     let mut state = whisper_context.create_state().unwrap();
     state.full(params, audio).unwrap();
 
+    Parlo {
+        segments: (0..state.full_n_segments().unwrap())
+            .map(|segment| {
+                let t0 = state.full_get_segment_t0(segment).unwrap();
+                let t1 = state.full_get_segment_t1(segment).unwrap();
+                let text = state.full_get_segment_text(segment).unwrap();
+                let tokens = (0..state.full_n_tokens(segment).unwrap())
+                    .map(|token| {
+                        let token_data = state.full_get_token_data(segment, token).unwrap();
+                        let token_text = state.full_get_token_text(segment, token).unwrap();
+                        ParloToken {
+                            id: token_data.id,
+                            tid: token_data.tid,
+                            p: token_data.p,
+                            plog: token_data.plog,
+                            pt: token_data.pt,
+                            ptsum: token_data.ptsum,
+                            t0: token_data.t0,
+                            t1: token_data.t1,
+                            vlen: token_data.vlen,
+                            text: token_text,
+                        }
+                    })
+                    .collect::<Vec<ParloToken>>();
+
+                ParloSegment {
+                    tokens,
+                    t0,
+                    t1,
+                    text,
+                }
+            })
+            .collect::<Vec<ParloSegment>>(),
+    }
+}
+
+fn export_to_srt(parlo_args: &ParloArgs, parlo: &Parlo) {
     let mut export = match parlo_args.export {
         Some(ref it) => Some(BufWriter::new(File::create(it).unwrap())),
         None => None,
     };
 
-    for i in 0..state.full_n_segments().unwrap() {
-        let start_time_millis = segment_timestamp_to_millis(state.full_get_segment_t0(i).unwrap());
-        let end_time_millis = segment_timestamp_to_millis(state.full_get_segment_t1(i).unwrap());
-        let segment = state.full_get_segment_text(i).unwrap();
-
-        match export {
-            Some(ref mut it) => {
+    match export {
+        Some(ref mut it) => {
+            parlo.segments.iter().enumerate().for_each(|(i, segment)| {
                 let text = format!(
                     "{i}\n{} --> {}\n{}\n\n",
-                    millis_to_time(start_time_millis),
-                    millis_to_time(end_time_millis),
-                    segment.trim()
+                    millis_to_time(segment_timestamp_to_millis(segment.t0)),
+                    millis_to_time(segment_timestamp_to_millis(segment.t1)),
+                    segment.text.trim()
                 );
                 it.write(text.as_bytes()).unwrap();
-            }
-            None => (),
-        };
-
-        println!(
-            "{i}\n{} --> {}\n{}\n",
-            millis_to_time(start_time_millis),
-            millis_to_time(end_time_millis),
-            segment.trim()
-        );
-    }
+            });
+        }
+        None => (),
+    };
 
     match export {
         Some(mut it) => it.flush().unwrap(),
         None => (),
     };
+}
+
+fn print_text_segments(parlo: &Parlo) {
+    parlo.segments.iter().enumerate().for_each(|(i, segment)| {
+        println!(
+            "{i}\n{} --> {}\n{}\n\n",
+            millis_to_time(segment_timestamp_to_millis(segment.t0)),
+            millis_to_time(segment_timestamp_to_millis(segment.t1)),
+            segment.text.trim()
+        );
+    });
 }
 
 fn segment_timestamp_to_millis(t: i64) -> usize {
