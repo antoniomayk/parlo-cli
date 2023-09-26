@@ -32,9 +32,13 @@ struct ParloArgs {
     #[arg(short, long)]
     model: String,
 
-    /// Export to SRT file
-    #[arg(short, long)]
-    export: Option<String>,
+    /// Export transcribed audio using SRT format
+    #[arg(long)]
+    srt: Option<String>,
+
+    /// Export transcribed audio using TXT format
+    #[arg(long)]
+    txt: Option<String>,
 }
 
 fn main() {
@@ -46,7 +50,9 @@ fn main() {
     let parlo = transcribe_audio_buffer(&audio, &model);
 
     print_text_segments(&parlo);
+
     export_to_srt(&parlo_args, &parlo);
+    export_to_txt(&parlo_args, &parlo);
 }
 
 fn read_audio_file(path: &str) -> Vec<f32> {
@@ -296,14 +302,24 @@ fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str) -> Parlo {
     }
 }
 
-fn export_to_srt(parlo_args: &ParloArgs, parlo: &Parlo) {
-    let mut export = match parlo_args.export {
-        Some(ref it) => Some(BufWriter::new(File::create(it).unwrap())),
-        None => None,
-    };
+fn export_to_txt(parlo_args: &ParloArgs, parlo: &Parlo) {
+    match parlo_args.txt {
+        Some(ref it) => {
+            let mut file_txt = BufWriter::new(File::create(it).unwrap());
+            parlo.segments.iter().for_each(|segment| {
+                let text = format!("{}\n", segment.text.trim());
+                file_txt.write(text.as_bytes()).unwrap();
+            });
+            file_txt.flush().unwrap();
+        }
+        None => (),
+    }
+}
 
-    match export {
-        Some(ref mut it) => {
+fn export_to_srt(parlo_args: &ParloArgs, parlo: &Parlo) {
+    match parlo_args.srt {
+        Some(ref it) => {
+            let mut file_srt = BufWriter::new(File::create(it).unwrap());
             parlo.segments.iter().enumerate().for_each(|(i, segment)| {
                 let text = format!(
                     "{i}\n{} --> {}\n{}\n\n",
@@ -311,16 +327,12 @@ fn export_to_srt(parlo_args: &ParloArgs, parlo: &Parlo) {
                     millis_to_time(segment_timestamp_to_millis(segment.t1)),
                     segment.text.trim()
                 );
-                it.write(text.as_bytes()).unwrap();
+                file_srt.write(text.as_bytes()).unwrap();
             });
+            file_srt.flush().unwrap();
         }
         None => (),
-    };
-
-    match export {
-        Some(mut it) => it.flush().unwrap(),
-        None => (),
-    };
+    }
 }
 
 fn print_text_segments(parlo: &Parlo) {
