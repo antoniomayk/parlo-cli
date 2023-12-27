@@ -1,17 +1,17 @@
+use std::{
+    fmt::Debug,
+    fs::File,
+    io::{BufWriter, ErrorKind, Write},
+};
+
 use clap::Parser;
 use indoc::formatdoc;
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use std::{
-    fmt::Debug,
-    fs::File,
-    io::{BufWriter, ErrorKind, Write},
-    result,
-};
 use symphonia::core::{
     audio::{AudioBufferRef, SampleBuffer},
-    codecs::{DecoderOptions, CODEC_TYPE_NULL},
+    codecs::{CODEC_TYPE_NULL, DecoderOptions},
     errors::Error,
     formats::FormatOptions,
     io::*,
@@ -47,7 +47,7 @@ fn main() {
     let audio = read_audio_file(&parlo_args.audio);
     let model = &parlo_args.model;
 
-    let parlo = transcribe_audio_buffer(&audio, &model);
+    let parlo = transcribe_audio_buffer(&audio, model);
 
     print_text_segments(&parlo);
 
@@ -117,7 +117,7 @@ fn read_audio_file(path: &str) -> Vec<f32> {
 
     let mut audio_buffer = Vec::<f32>::new();
 
-    let result: Result<(), symphonia::core::errors::Error> = loop {
+    let result: Result<(), Error> = loop {
         let packet = match format.next_packet() {
             Ok(it) => it,
             Err(err) => break Err(err),
@@ -153,13 +153,13 @@ fn read_audio_file(path: &str) -> Vec<f32> {
     audio_buffer
 }
 
-fn handle_eof_err(result: result::Result<(), Error>) -> result::Result<(), Error> {
+fn handle_eof_err(result: Result<(), Error>) -> Result<(), Error> {
     match result {
         Err(Error::IoError(err))
-            if err.kind() == ErrorKind::UnexpectedEof && err.to_string() == "end of stream" =>
-        {
-            Ok(())
-        }
+        if err.kind() == ErrorKind::UnexpectedEof && err.to_string() == "end of stream" =>
+            {
+                Ok(())
+            }
         _ => result,
     }
 }
@@ -172,8 +172,8 @@ fn stereo_to_mono(samples_left: &[f32], samples_right: &[f32]) -> Vec<f32> {
         .collect::<Vec<f32>>()
 }
 
-fn resample_audio_buffer<'a>(audio_buffer: AudioBufferRef<'_>) -> Vec<Vec<f32>> {
-    let resample_ratio = 16_000 as f64 / audio_buffer.spec().rate as f64;
+fn resample_audio_buffer(audio_buffer: AudioBufferRef<'_>) -> Vec<Vec<f32>> {
+    let resample_ratio = 16_000f64 / audio_buffer.spec().rate as f64;
     let audio_buffer_capacity = audio_buffer.capacity();
     let audio_buffer_frames = audio_buffer.frames();
     let audio_buffer_channels_count = audio_buffer.spec().channels.count();
@@ -252,7 +252,7 @@ pub struct Parlo {
     pub segments: Vec<ParloSegment>,
 }
 
-fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str) -> Parlo {
+fn transcribe_audio_buffer(audio: &[f32], model: &str) -> Parlo {
     let whisper_context = WhisperContext::new(model).unwrap();
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 2 });
@@ -303,35 +303,29 @@ fn transcribe_audio_buffer(audio: &Vec<f32>, model: &str) -> Parlo {
 }
 
 fn export_to_txt(parlo_args: &ParloArgs, parlo: &Parlo) {
-    match parlo_args.txt {
-        Some(ref it) => {
-            let mut file_txt = BufWriter::new(File::create(it).unwrap());
-            parlo.segments.iter().for_each(|segment| {
-                let text = format!("{}\n", segment.text.trim());
-                file_txt.write(text.as_bytes()).unwrap();
-            });
-            file_txt.flush().unwrap();
-        }
-        None => (),
+    if let Some(ref it) = parlo_args.txt {
+        let mut file_txt = BufWriter::new(File::create(it).unwrap());
+        parlo.segments.iter().for_each(|segment| {
+            let text = format!("{}\n", segment.text.trim());
+            file_txt.write_all(text.as_bytes()).unwrap();
+        });
+        file_txt.flush().unwrap();
     }
 }
 
 fn export_to_srt(parlo_args: &ParloArgs, parlo: &Parlo) {
-    match parlo_args.srt {
-        Some(ref it) => {
-            let mut file_srt = BufWriter::new(File::create(it).unwrap());
-            parlo.segments.iter().enumerate().for_each(|(i, segment)| {
-                let text = format!(
-                    "{i}\n{} --> {}\n{}\n\n",
-                    millis_to_time(segment_timestamp_to_millis(segment.t0)),
-                    millis_to_time(segment_timestamp_to_millis(segment.t1)),
-                    segment.text.trim()
-                );
-                file_srt.write(text.as_bytes()).unwrap();
-            });
-            file_srt.flush().unwrap();
-        }
-        None => (),
+    if let Some(ref it) = parlo_args.srt {
+        let mut file_srt = BufWriter::new(File::create(it).unwrap());
+        parlo.segments.iter().enumerate().for_each(|(i, segment)| {
+            let text = format!(
+                "{i}\n{} --> {}\n{}\n\n",
+                millis_to_time(segment_timestamp_to_millis(segment.t0)),
+                millis_to_time(segment_timestamp_to_millis(segment.t1)),
+                segment.text.trim()
+            );
+            file_srt.write_all(text.as_bytes()).unwrap();
+        });
+        file_srt.flush().unwrap();
     }
 }
 
@@ -347,7 +341,7 @@ fn print_text_segments(parlo: &Parlo) {
 }
 
 fn segment_timestamp_to_millis(t: i64) -> usize {
-    t as usize * 10 as usize
+    t as usize * 10usize
 }
 
 fn millis_to_time(milliseconds: usize) -> String {
